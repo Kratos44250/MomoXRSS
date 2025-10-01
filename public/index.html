@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <title>MomoXRss</title>
+  <style>
+    body { font-family: Arial, sans-serif; padding: 20px; background: #f4f4f4; }
+    h1 { color: #333; }
+    input, button, select { margin: 5px 0; padding: 8px; width: 100%; }
+    .flux { background: #fff; padding: 10px; margin-bottom: 10px; border-radius: 5px; }
+    .flux button { margin-top: 5px; margin-right: 8px; }
+    .hint { font-size: 12px; color: #666; }
+    .bad { color: #b00; font-weight: bold; }
+    .ok { color: #0a0; font-weight: bold; }
+  </style>
+</head>
+<body>
+  <h1>📰 MomoXRss</h1>
+
+  <h2>➕ Ajouter un flux RSS</h2>
+  <form id="addForm">
+    <input type="text" id="rssUrl" placeholder="URL du flux RSS" required>
+    <input type="text" id="discordTarget" placeholder="ID du channel forum Discord (ex: 1422270965198491918)" required>
+    <div class="hint">⚠️ Utilise uniquement l’ID numérique du channel, pas l’URL complète. Si tu colles une URL, elle sera automatiquement convertie en ID.</div>
+    <input type="number" id="interval" placeholder="Intervalle en ms (ex: 3600000 = 1h)">
+    <button type="submit">Ajouter</button>
+  </form>
+
+  <h2>🧪 Tester un flux RSS</h2>
+  <form id="testForm">
+    <input type="text" id="testUrl" placeholder="URL du flux RSS à tester" required>
+    <button type="submit">Tester</button>
+    <div id="testResult"></div>
+  </form>
+
+  <h2>📋 Flux enregistrés</h2>
+  <div id="fluxList"></div>
+
+  <h2>✍️ Envoyer un article personnalisé</h2>
+  <form id="manualForm">
+    <input type="text" id="manualTitle" placeholder="Titre de l'article" required>
+    <input type="text" id="manualLink" placeholder="Lien de l'article" required>
+    <input type="text" id="manualDiscord" placeholder="ID du channel forum Discord" required>
+    <button type="submit">Envoyer</button>
+  </form>
+
+  <script>
+    // Extrait l'ID de channel si une URL Discord est collée, sinon retourne la valeur trimée
+    function normalizeDiscordTarget(input) {
+      if (!input) return '';
+      const trimmed = String(input).trim();
+      if (trimmed.includes('discord.com/channels/')) {
+        // format: https://discord.com/channels/<guildId>/<channelId>
+        const parts = trimmed.split('/').filter(Boolean);
+        const channelId = parts[parts.length - 1];
+        return channelId;
+      }
+      return trimmed;
+    }
+
+    function isValidDiscordId(id) {
+      return /^[0-9]{16,21}$/.test(id); // la plupart des IDs font 18-19 chiffres
+    }
+
+    async function safeJson(res) {
+      try { return await res.json(); } catch { return null; }
+    }
+    async function safeText(res) {
+      try { return await res.text(); } catch { return ''; }
+    }
+
+    async function loadFlux() {
+      const res = await fetch('/list');
+      if (!res.ok) {
+        alert('Impossible de charger la liste des flux: ' + res.status);
+        return;
+      }
+      const fluxes = await res.json();
+      const container = document.getElementById('fluxList');
+      container.innerHTML = '';
+      fluxes.forEach(f => {
+        const normalized = normalizeDiscordTarget(f.discordTarget);
+        const valid = isValidDiscordId(normalized);
+        const div = document.createElement('div');
+        div.className = 'flux';
+        div.innerHTML = `
+          <strong>${f.rssUrl}</strong><br>
+          Channel: ${f.discordTarget}
+          ${valid ? '<span class="ok">[ID OK]</span>' : '<span class="bad">[ID incorrect — URL détectée]</span>'}<br>
+          Intervalle : ${f.interval} ms<br>
+          État : ${f.active ? '✅ Actif' : '⛔ Désactivé'}<br>
+          <div>
+            <button onclick="sendLatest('${f.rssUrl}')">🧪 Envoyer dernier article</button>
+            <button onclick="changeInterval('${f.rssUrl}')">⏱️ Modifier fréquence</button>
+            <button onclick="editFlux('${f.rssUrl}')">✏️ Modifier flux</button>
+            <button onclick="toggleFlux('${f.rssUrl}')">${f.active ? '⏸️ Désactiver' : '▶️ Activer'}</button>
+            <button onclick="deleteFlux('${f.rssUrl}')">🗑️ Supprimer</button>
+            ${!valid ? `<button onclick="fixTarget('${f.rssUrl}','${normalized}')">🛠️ Corriger ID</button>` : ''}
+          </div>
+        `;
+        container.appendChild(div);
+      });
+    }
+
+    // Envoie en se basant sur le flux enregistré (et normalisé) pour éviter les mismatches
+    async function sendLatest(rssUrl) {
+      // Récupère la liste des flux et trouve celui correspondant
+      const listRes = await fetch('/list');
+      if (!listRes.ok) {
+        alert('Impossible de récupérer les flux: ' + listRes.status);
+        return;
+      }
+      const fluxes = await listRes.json();
+      const flux = fluxes.find(f => f.rssUrl === rssUrl);
+      if (!flux) {
+        alert('Flux introuvable');
+        return;
+      }
+      const target = normalizeDiscordTarget(flux.discordTarget);
+      if (!isValidDiscordId(target)) {
+        alert("discordTarget invalide — corrige l'ID du channel pour ce flux.");
+        return;
+      }
+
+      const resp = await fetch('/send-latest', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ rssUrl, discordTarget: target })
+      });
+
+      if (!resp.ok) {
+        const msg = await safeText(resp);
+        alert('Échec de l’envoi: ' + (msg || resp.status));
+        return;
+      }
+      alert('Dernier article envoyé sur Discord');
+    }
+
+    async function changeInterval(rssUrl) {
+      const interval = prompt('Nouvel intervalle en ms :');
+      if (!interval) return;
+      const iv = parseInt(interval);
+      if (Number.isNaN(iv) || iv < 60000) {
+        alert('Intervalle invalide (min recommandé: 60000 ms)');
+        return;
+      }
+      const resp = await fetch('/update', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ rssUrl, interval: iv })
+      });
+      if (!resp.ok) {
+        const msg = await safeText(resp);
+        alert('Échec mise à jour: ' + (msg || resp.status));
+        return;
+      }
+      alert('Intervalle mis à jour');
+      loadFlux();
+    }
+
+    async function editFlux(rssUrl) {
+      const newRssUrl = prompt('Nouvelle URL RSS (laisser vide pour ne pas changer) :');
+      const discordTargetInput = prompt('Nouvel ID du forum Discord (laisser vide pour ne pas changer) :');
+      const intervalInput = prompt('Nouvel intervalle en ms (laisser vide pour ne pas changer) :');
+
+      const payload = { rssUrl };
+
+      if (newRssUrl) payload.newRssUrl = newRssUrl;
+      if (discordTargetInput) {
+        const target = normalizeDiscordTarget(discordTargetInput);
+        if (!isValidDiscordId(target)) {
+          alert("discordTarget invalide — fournis l'ID numérique du channel, pas une URL.");
+          return;
+        }
+        payload.discordTarget = target;
+      }
+      if (intervalInput) {
+        const iv = parseInt(intervalInput);
+        if (Number.isNaN(iv) || iv < 60000) {
+          alert('Intervalle invalide (min recommandé: 60000 ms)');
+          return;
+        }
+        payload.interval = iv;
+      }
+
+      const resp = await fetch('/update', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+
+      if (!resp.ok) {
+        const msg = await safeText(resp);
+        alert('Échec mise à jour: ' + (msg || resp.status));
+        return;
+      }
+
+      alert('Flux mis à jour');
+      loadFlux();
+    }
+
+    async function toggleFlux(rssUrl) {
+      const res = await fetch('/toggle', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ rssUrl })
+      });
+      if (!res.ok) {
+        const msg = await safeText(res);
+        alert('Échec toggle: ' + (msg || res.status));
+        return;
+      }
+      const data = await res.json();
+      alert(data.active ? 'Flux activé' : 'Flux désactivé');
+      loadFlux();
+    }
+
+    async function deleteFlux(rssUrl) {
+      if (!confirm('Confirmer la suppression de ce flux ?')) return;
+      const resp = await fetch('/delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ rssUrl })
+      });
+      if (!resp.ok) {
+        const msg = await safeText(resp);
+        alert('Échec suppression: ' + (msg || resp.status));
+        return;
+      }
+      alert('Flux supprimé');
+      loadFlux();
+    }
+
+    // Corrige en base un discordTarget au mauvais format pour le flux donné
+    async function fixTarget(rssUrl, normalized) {
+      if (!isValidDiscordId(normalized)) {
+        alert("Impossible de corriger: l'ID normalisé n'est pas valide.");
+        return;
+      }
+      const resp = await fetch('/update', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ rssUrl, discordTarget: normalized })
+      });
+      if (!resp.ok) {
+        const msg = await safeText(resp);
+        alert('Échec correction: ' + (msg || resp.status));
+        return;
+      }
+      alert('discordTarget corrigé');
+      loadFlux();
+    }
+
+    document.getElementById('addForm').onsubmit = async e => {
+      e.preventDefault();
+      const rssUrl = document.getElementById('rssUrl').value.trim();
+      const discordTargetRaw = document.getElementById('discordTarget').value;
+      const discordTarget = normalizeDiscordTarget(discordTargetRaw);
+      const intervalStr = document.getElementById('interval').value;
+      const interval = intervalStr ? parseInt(intervalStr) : undefined;
+
+      if (!isValidDiscordId(discordTarget)) {
+        alert("discordTarget invalide — fournis l'ID numérique du channel, pas une URL.");
+        return;
+      }
+      if (interval !== undefined && (Number.isNaN(interval) || interval < 60000)) {
+        alert('Intervalle invalide (min recommandé: 60000 ms)');
+        return;
+      }
+
+      const resp = await fetch('/add', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ rssUrl, discordTarget, interval })
+      });
+
+      if (!resp.ok) {
+        const msg = await safeText(resp);
+        alert('Échec ajout: ' + (msg || resp.status));
+        return;
+      }
+
+      alert('Flux ajouté');
+      document.getElementById('addForm').reset();
+      loadFlux();
+    };
+
+    document.getElementById('testForm').onsubmit = async e => {
+      e.preventDefault();
+      const testUrl = document.getElementById('testUrl').value.trim();
+      const res = await fetch('/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ rssUrl: testUrl })
+      });
+      const resultDiv = document.getElementById('testResult');
+      if (!res.ok) {
+        const msg = await safeText(res);
+        resultDiv.innerHTML = `<span class="bad">Test échoué: ${msg || res.status}</span>`;
+        return;
+      }
+      const data = await res.json();
+      resultDiv.innerHTML = `
+        <strong>${data.title || 'Flux'}</strong><br>
+        <ul>${(data.items || []).map(i => `<li>${i.title}</li>`).join('')}</ul>
+      `;
+    };
+
+    document.getElementById('manualForm').onsubmit = async e => {
+      e.preventDefault();
+      const title = document.getElementById('manualTitle').value.trim();
+      const link = document.getElementById('manualLink').value.trim();
+      const discordTargetRaw = document.getElementById('manualDiscord').value;
+      const discordTarget = normalizeDiscordTarget(discordTargetRaw);
+
+      if (!isValidDiscordId(discordTarget)) {
+        alert("discordTarget invalide — fournis l'ID numérique du channel, pas une URL.");
+        return;
+      }
+
+      const resp = await fetch('/manual', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title, link, discordTarget })
+      });
+
+      if (!resp.ok) {
+        const msg = await safeText(resp);
+        alert('Échec envoi: ' + (msg || resp.status));
+        return;
+      }
+
+      alert('Article envoyé');
+      document.getElementById('manualForm').reset();
+    };
+
+    loadFlux();
+  </script>
+</body>
+</html>

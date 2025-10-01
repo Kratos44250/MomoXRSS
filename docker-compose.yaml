@@ -1,0 +1,26 @@
+version: '3.8'
+
+services:
+  mongodb:
+    image: mongo
+    container_name: mongodb
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo-data:/data/db
+
+  momoxrss:
+    build: .
+    container_name: momoxrss-1
+    ports:
+      - "3000:3000"
+    depends_on:
+      - mongodb
+    environment:
+      MONGO_URL: mongodb://mongodb:27017/momoxrss
+      DISCORD_BOT_TOKEN: MTQyMjMwMjA1NzI4MDQzODMxMg.Gkihik.rUWmcHsT01e9eUc-thL_eUzCvJEJ0kaLTmkJwE
+    volumes:
+      - .:/app
+
+volumes:
+  mongo-data:
